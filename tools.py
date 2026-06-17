@@ -69,8 +69,38 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+
+    # Tokenize the description into lowercase keywords.
+    keywords = [w for w in description.lower().split() if w]
+
+    results = []
+    for item in listings:
+        # --- Price filter (inclusive) ---
+        if max_price is not None and item["price"] > max_price:
+            continue
+
+        # --- Size filter (case-insensitive substring match) ---
+        # e.g. "M" matches "S/M", "M/L"; "8" matches "US 8".
+        if size is not None and size.strip():
+            if size.strip().lower() not in item["size"].lower():
+                continue
+
+        # --- Relevance score: keyword overlap with title / description / tags ---
+        haystack = " ".join(
+            [item["title"], item["description"], " ".join(item["style_tags"])]
+        ).lower()
+        score = sum(1 for kw in keywords if kw in haystack)
+
+        # Drop items with no keyword match at all.
+        if score == 0:
+            continue
+
+        results.append((score, item))
+
+    # Sort by score, highest first. Returns [] when nothing matched.
+    results.sort(key=lambda pair: pair[0], reverse=True)
+    return [item for _, item in results]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +130,64 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    item_desc = (
+        f"{new_item.get('title', 'this item')} "
+        f"(category: {new_item.get('category', 'unknown')}, "
+        f"colors: {', '.join(new_item.get('colors', [])) or 'n/a'}, "
+        f"style: {', '.join(new_item.get('style_tags', [])) or 'n/a'})"
+    )
+
+    items = wardrobe.get("items", [])
+
+    if not items:
+        # --- Empty-wardrobe branch: general styling advice, no owned pieces. ---
+        prompt = (
+            f"A shopper is considering buying this secondhand item: {item_desc}.\n"
+            "They have NOT entered any wardrobe yet, so do not reference specific "
+            "pieces they own. Suggest 1-2 complete outfit ideas in general terms: "
+            "what categories, colors, and silhouettes pair well with it, and what "
+            "overall vibe it suits. Keep it to 3-4 sentences, friendly and concrete."
+        )
+    else:
+        # --- Populated-wardrobe branch: name specific owned pieces. ---
+        wardrobe_lines = "\n".join(
+            f"- {it['name']} ({it.get('category', '')}; "
+            f"{', '.join(it.get('colors', []))}; "
+            f"{', '.join(it.get('style_tags', []))})"
+            for it in items
+        )
+        prompt = (
+            f"A shopper is considering buying this secondhand item: {item_desc}.\n\n"
+            f"Here is their current wardrobe:\n{wardrobe_lines}\n\n"
+            "Suggest 1-2 complete outfit combinations that style the new item with "
+            "SPECIFIC pieces from their wardrobe (name them). Mention how to wear it "
+            "(layering, tucking, etc.) where useful. Keep it to 3-5 sentences, "
+            "friendly and concrete."
+        )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a sharp, encouraging personal stylist who "
+                    "gives specific, wearable outfit advice.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        # Never crash the agent — return a usable fallback string.
+        return (
+            f"Couldn't reach the styling model ({e.__class__.__name__}). "
+            f"As a starting point, {new_item.get('title', 'this piece')} works well "
+            f"with simple basics in neutral colors — build the rest of the outfit "
+            f"around its {', '.join(new_item.get('style_tags', [])) or 'overall'} vibe."
+        )
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +219,48 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    # --- Guard: no outfit to caption. ---
+    if not outfit or not outfit.strip():
+        return (
+            "Can't write a fit card without an outfit suggestion — "
+            "try styling the item first."
+        )
+
+    title = new_item.get("title", "this piece")
+    price = new_item.get("price")
+    platform = new_item.get("platform", "secondhand")
+    price_str = f"${price:.0f}" if isinstance(price, (int, float)) else "a steal"
+
+    prompt = (
+        f"Write a short, shareable outfit caption (like a real Instagram/TikTok "
+        f"OOTD post — casual, a little playful, NOT a product description).\n\n"
+        f"Item: {title}\n"
+        f"Price: {price_str}\n"
+        f"Platform: {platform}\n"
+        f"Outfit being worn: {outfit}\n\n"
+        "Rules: 2-4 sentences. Mention the item name, the price, and the platform "
+        "naturally, once each. Capture the outfit's specific vibe. Lowercase-casual "
+        "is fine. An emoji or two is fine. Make it sound like a real person posting."
+    )
+
+    try:
+        client = _get_groq_client()
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You write punchy, authentic social-media outfit "
+                    "captions that sound like a real person, never an ad.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.9,  # high temperature → varied output across runs
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        # Fallback caption built from the item fields — never raises.
+        return (
+            f"thrifted this {title.lower()} off {platform} for {price_str} and "
+            f"i'm obsessed 🛍️ styled it exactly how i wanted. full fit in stories!"
+        )
